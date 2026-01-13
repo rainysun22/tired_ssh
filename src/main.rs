@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
+use russh::client::Msg;
 use russh::keys::*;
 use russh::*;
 use russh::ChannelMsg;
@@ -90,10 +91,13 @@ impl Session {
         let (w, h) = terminal::size()?;
         channel.request_pty(false, "xterm", w as u32, h as u32, 0, 0, &[]).await?;
         channel.request_shell(false).await?;
+        self.run(&mut channel).await?;
+        Ok(())
+    }
 
+    async fn run(&self, channel: &mut Channel<Msg>) -> Result<()> {
         let mut stdin = tokio::io::stdin();
         let mut stdout = tokio::io::stdout();
-
         let mut buf = [0; 1024];
 
         loop {
