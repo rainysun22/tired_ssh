@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
 use log::info;
 use russh::keys::*;
 use russh::*;
+use russh::ChannelMsg;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::ToSocketAddrs;
 
 use crossterm::terminal::{self, enable_raw_mode, disable_raw_mode};
@@ -14,7 +15,7 @@ use crossterm::terminal::{self, enable_raw_mode, disable_raw_mode};
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+        .filter_level(log::LevelFilter::Info)
         .init();
 
     let cli = Cli::parse();
@@ -29,7 +30,7 @@ async fn main() -> Result<()> {
     info!("Connected");
 
     enable_raw_mode()?;
-    ssh.start_shell().await?;
+    ssh.run_shell().await?;
     ssh.close().await?;
     disable_raw_mode()?;
     Ok(())
@@ -60,7 +61,6 @@ impl Session {
     ) -> Result<Self> {
 
         let config = client::Config {
-            inactivity_timeout: Some(Duration::from_secs(5)),
             preferred: Preferred {
                 kex: Cow::Owned(vec![
                     russh::kex::CURVE25519_PRE_RFC_8731,
@@ -82,14 +82,53 @@ impl Session {
             anyhow::bail!("Authentication (with password) failed");
         }
 
-        Ok(Self { session })
+        Ok(Self { session: session })
     }
 
-    async fn start_shell(&mut self) -> Result<()> {
+    async fn run_shell(&mut self) -> Result<()> {
         let mut channel = self.session.channel_open_session().await?;
         let (w, h) = terminal::size()?;
         channel.request_pty(false, "xterm", w as u32, h as u32, 0, 0, &[]).await?;
         channel.request_shell(false).await?;
+
+        let mut stdin = tokio::io::stdin();
+        let mut stdout = tokio::io::stdout();
+
+        let mut buf = [0; 1024];
+
+        loop {
+            tokio::select! {
+                res = stdin.read(&mut buf) => {
+                    match res {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            channel.data(&buf[..n]).await?;
+                        }
+                        Err(e) => anyhow::bail!("Error reading from stdin: {}", e),
+                    }
+                }
+                msg = channel.wait() => {
+                    match msg {
+                        Some(ChannelMsg::Data { data }) => {
+                            stdout.write_all(&data).await?;
+                            stdout.flush().await?;
+                        }
+                        Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            stdout.write_all(&data).await?;
+                            stdout.flush().await?;
+                        }
+                        Some(ChannelMsg::ExitStatus { exit_status }) => {
+                            info!("Exit status: {}", exit_status);
+                            break;
+                        }
+                        None => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
