@@ -5,15 +5,25 @@ use log::info;
 use russh::client::Msg;
 use russh::*;
 use russh::ChannelMsg;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::ToSocketAddrs;
-
-use crossterm::terminal;
 
 use super::client::Client;
 
 pub struct Session {
     session: client::Handle<Client>,
+    channel: Channel<Msg>,
+}
+
+pub struct PtyOptions<'a> {
+    pub term: &'a str,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub enum SshEvent {
+    Data(Vec<u8>),
+    Exit(u32),
+    Closed,
 }
 
 impl Session {
@@ -21,7 +31,7 @@ impl Session {
         user: impl Into<String>,
         password: impl Into<String>,
         addrs: A,
-    ) -> Result<Self> {
+    ) -> Result<client::Handle<Client>> {
 
         let config = client::Config {
             preferred: Preferred {
@@ -35,9 +45,9 @@ impl Session {
         };
 
         let config = Arc::new(config);
-        let sh = Client {};
+        let client = Client {};
 
-        let mut session = client::connect(config, addrs, sh).await?;
+        let mut session = client::connect(config, addrs, client).await?;
         let auth_res = session
             .authenticate_password(user, password)
             .await?;
@@ -45,57 +55,45 @@ impl Session {
             anyhow::bail!("Authentication (with password) failed");
         }
 
-        Ok(Self { session: session })
+        Ok(session)
     }
 
-    pub async fn run_shell(&mut self) -> Result<()> {
-        let mut channel = self.session.channel_open_session().await?;
-        let (w, h) = terminal::size()?;
-        channel.request_pty(false, "xterm", w as u32, h as u32, 0, 0, &[]).await?;
-        channel.request_shell(false).await?;
-        self.run(&mut channel).await?;
+    pub async fn open(session: client::Handle<Client>) -> Result<Self> {
+        let channel = session.channel_open_session().await?;
+        Ok(Self { session: session, channel: channel })
+    }
+
+    pub async fn request_pty(&mut self, opts: PtyOptions<'_>) -> Result<()> {
+        self.channel.request_pty(false, opts.term, opts.width, opts.height, 0, 0, &[]).await?;
         Ok(())
     }
 
-    async fn run(&self, channel: &mut Channel<Msg>) -> Result<()> {
-        let mut stdin = tokio::io::stdin();
-        let mut stdout = tokio::io::stdout();
-        let mut buf = [0; 1024];
+    pub async fn start_shell(&mut self) -> Result<()> {
+        self.channel.request_shell(false).await?;
+        Ok(())
+    }
 
-        loop {
-            tokio::select! {
-                res = stdin.read(&mut buf) => {
-                    match res {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            channel.data(&buf[..n]).await?;
-                        }
-                        Err(e) => anyhow::bail!("Error reading from stdin: {}", e),
-                    }
-                }
-                msg = channel.wait() => {
-                    match msg {
-                        Some(ChannelMsg::Data { data }) => {
-                            stdout.write_all(&data).await?;
-                            stdout.flush().await?;
-                        }
-                        Some(ChannelMsg::ExtendedData { data, .. }) => {
-                            stdout.write_all(&data).await?;
-                            stdout.flush().await?;
-                        }
-                        Some(ChannelMsg::ExitStatus { exit_status }) => {
-                            info!("Exit status: {}", exit_status);
-                            break;
-                        }
-                        None => {
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
+    pub async fn send(&mut self, data: &[u8]) -> Result<()> {
+        self.channel.data(data).await?;
+        Ok(())
+    }
+
+    pub async fn next_event(&mut self) -> Option<SshEvent> {
+        match self.channel.wait().await {
+            Some(ChannelMsg::Data { data }) => {
+                Some(SshEvent::Data(data.to_vec()))
             }
+            Some(ChannelMsg::ExtendedData { data, .. }) => {
+                Some(SshEvent::Data(data.to_vec()))
+            }
+            Some(ChannelMsg::ExitStatus { exit_status }) => {
+                info!("Exit status: {}", exit_status);
+                Some(SshEvent::Exit(exit_status))
+            }
+            None => Some(SshEvent::Closed),
+            _ => None,
+
         }
-        Ok(())
     }
 
     pub async fn close(&mut self) -> Result<()> {

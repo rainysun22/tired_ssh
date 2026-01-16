@@ -12,4 +12,5 @@ log = "0.4"
 env_logger = "0.11"
 shell-escape = "0.1"
 clap = { version = "3.2.3", features = ["derive"] }
-crossterm = "0.29.0"
+alacritty_terminal = "0.25.1"
+vte = "0.15.0"

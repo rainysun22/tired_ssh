@@ -1,10 +1,10 @@
 use anyhow::Result;
 use log::info;
 use clap::Parser;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
 mod ssh;
-use ssh::session::Session;
+use ssh::session::{Session, PtyOptions, SshEvent};
+mod terminal;
 
 #[derive(clap::Parser)]
 pub struct Cli {
@@ -25,7 +25,7 @@ pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     info!("Connecting to {}:{}", cli.host, cli.port);
 
-    let mut ssh = Session::connect(
+    let handle = Session::connect(
         cli.username.unwrap_or("root".to_string()),
         cli.password,
         (cli.host, cli.port),
@@ -33,9 +33,14 @@ pub async fn run() -> Result<()> {
     .await?;
     info!("Connected");
 
-    enable_raw_mode()?;
-    ssh.run_shell().await?;
+    let mut ssh  = Session::open(handle).await?;
+    let pty = PtyOptions {
+        term: "xterm",
+        width: 80,
+        height: 24,
+    };
+    ssh.request_pty(pty).await?;
+    ssh.start_shell().await?;
     ssh.close().await?;
-    disable_raw_mode()?;
     Ok(())
 }
