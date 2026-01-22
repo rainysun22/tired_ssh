@@ -5,6 +5,8 @@ use clap::Parser;
 mod ssh;
 use ssh::session::{Session, PtyOptions, SshEvent};
 mod terminal;
+use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(clap::Parser)]
 pub struct Cli {
@@ -39,8 +41,39 @@ pub async fn run() -> Result<()> {
         width: 80,
         height: 24,
     };
+    enable_raw_mode()?;
     ssh.request_pty(pty).await?;
     ssh.start_shell().await?;
+
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    let mut buf = [0; 1024];
+
+    loop {
+        tokio::select! {
+            output = ssh.next_event() => {
+                match output {
+                    Some(SshEvent::Data(data)) => {
+                        stdout.write_all(&data).await?;
+                        stdout.flush().await?;
+                    }
+                    Some(SshEvent::Exit(_)) => break,
+                    Some(SshEvent::Closed) => break,
+                    None => {},
+                }
+            },
+            input = stdin.read(&mut buf) => {
+                match input {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        ssh.send(&buf[..n]).await?;
+                    }
+                    Err(e) => anyhow::bail!("Error reading from stdin: {}", e),
+                }
+            },
+        }
+    }
     ssh.close().await?;
+    disable_raw_mode()?;
     Ok(())
 }
